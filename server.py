@@ -1,3 +1,4 @@
+
 """
 Server that:
   1. Receives TradingView webhook alerts -> auto-executes trades on Bybit
@@ -11,6 +12,7 @@ here, e.g. http://YOUR_SERVER_IP:5000).
 """
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from collections import deque
 from datetime import datetime
 import config
@@ -21,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("server")
 
 app = Flask(__name__)
+CORS(app)  # allows the GitHub Pages dashboard (different domain) to call this API
 
 # Keep the last 50 signals/trades in memory to show on the dashboard
 recent_activity = deque(maxlen=50)
