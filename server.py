@@ -1,4 +1,3 @@
-
 """
 Server that:
   1. Receives TradingView webhook alerts -> auto-executes trades on Bybit
@@ -15,8 +14,11 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from collections import deque
 from datetime import datetime
+import threading
+import time
 import config
 import bybit_trader
+import strategy
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -107,9 +109,54 @@ def api_manual_trade():
     return jsonify(result)
 
 
+@app.route("/api/money_plan", methods=["POST"])
+def api_money_plan():
+    data = request.get_json(silent=True) or {}
+    if not _check_dashboard_auth(data):
+        return jsonify({"status": "error", "reason": "unauthorized"}), 401
+    import money_plan
+    return jsonify({"table": money_plan.build_table()})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "running", "testnet": config.BYBIT_TESTNET})
+
+
+# ---------- Automatic strategy loop (replaces TradingView alerts) ----------
+
+_strategy_started = False
+_strategy_lock = threading.Lock()
+
+
+def _strategy_loop():
+    log.info("Auto-strategy loop started (checking every 5 minutes)")
+    while True:
+        try:
+            results = strategy.run_all_symbols()
+            for symbol, result in results.items():
+                if result is not None:
+                    _log_activity({
+                        "source": "auto_strategy",
+                        "symbol": symbol,
+                        "action": result.get("action", "?"),
+                        "result": result,
+                    })
+        except Exception as e:
+            log.error(f"Strategy loop error: {e}")
+        time.sleep(300)  # 5 minutes
+
+
+def start_strategy_loop():
+    global _strategy_started
+    with _strategy_lock:
+        if not _strategy_started:
+            _strategy_started = True
+            thread = threading.Thread(target=_strategy_loop, daemon=True)
+            thread.start()
+
+
+start_strategy_loop()
 
 
 if __name__ == "__main__":
