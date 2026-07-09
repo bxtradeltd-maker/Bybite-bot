@@ -104,9 +104,42 @@ def api_manual_trade():
     if not symbol or action not in ("buy", "sell"):
         return jsonify({"status": "error", "reason": "missing_or_invalid_fields"}), 400
 
-    result = bybit_trader.place_trade(symbol, action, sl_price=data.get("sl"), tp_price=data.get("tp"))
+    amount_usd = data.get("amount_usd")
+    try:
+        amount_usd = float(amount_usd) if amount_usd not in (None, "") else None
+    except (TypeError, ValueError):
+        amount_usd = None
+
+    result = bybit_trader.place_trade(symbol, action, sl_price=data.get("sl"), tp_price=data.get("tp"), amount_usd=amount_usd)
     _log_activity({"source": "dashboard_manual", "symbol": symbol, "action": action, "result": result})
     return jsonify(result)
+
+
+@app.route("/api/backtest", methods=["POST"])
+def api_backtest():
+    data = request.get_json(silent=True) or {}
+    if not _check_dashboard_auth(data):
+        return jsonify({"status": "error", "reason": "unauthorized"}), 401
+    import strategy
+    symbol = data.get("symbol", "BTCUSDT")
+    result = strategy.backtest_symbol(symbol)
+    return jsonify(result)
+
+
+@app.route("/api/prices", methods=["POST"])
+def api_prices():
+    data = request.get_json(silent=True) or {}
+    if not _check_dashboard_auth(data):
+        return jsonify({"status": "error", "reason": "unauthorized"}), 401
+    return jsonify({"prices": bybit_trader.get_live_prices()})
+
+
+@app.route("/api/history", methods=["POST"])
+def api_history():
+    data = request.get_json(silent=True) or {}
+    if not _check_dashboard_auth(data):
+        return jsonify({"status": "error", "reason": "unauthorized"}), 401
+    return jsonify(bybit_trader.get_trade_history())
 
 
 @app.route("/api/money_plan", methods=["POST"])
