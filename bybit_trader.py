@@ -18,6 +18,7 @@ session = HTTP(
 )
 
 _daily_loss_locked = False
+_daily_target_locked = False
 _daily_lock_date = None
 _start_of_day_equity = None
 
@@ -31,14 +32,21 @@ def _get_equity():
         return None
 
 
-def _check_daily_loss_lock():
-    global _daily_loss_locked, _daily_lock_date, _start_of_day_equity
+def _refresh_daily_baseline():
+    """Resets both locks and captures start-of-day equity when the date rolls over."""
+    global _daily_loss_locked, _daily_target_locked, _daily_lock_date, _start_of_day_equity
     today = datetime.now().date()
-
     if _daily_lock_date != today:
         _daily_loss_locked = False
+        _daily_target_locked = False
         _daily_lock_date = today
         _start_of_day_equity = _get_equity()
+
+
+def _check_daily_loss_lock():
+    """Drawdown stop - halts trading for the day if losses hit MAX_DAILY_LOSS_PERCENT."""
+    global _daily_loss_locked
+    _refresh_daily_baseline()
 
     if _start_of_day_equity is None or _start_of_day_equity <= 0:
         return _daily_loss_locked
@@ -50,10 +58,32 @@ def _check_daily_loss_lock():
     loss_percent = (_start_of_day_equity - current_equity) / _start_of_day_equity * 100
     if loss_percent >= config.MAX_DAILY_LOSS_PERCENT:
         if not _daily_loss_locked:
-            log.warning(f"Daily loss limit hit ({loss_percent:.2f}%). Trading locked for today.")
+            log.warning(f"Daily drawdown limit hit ({loss_percent:.2f}%). Trading locked for today.")
         _daily_loss_locked = True
 
     return _daily_loss_locked
+
+
+def _check_daily_target_lock():
+    """Profit-target stop - halts NEW trades once DAILY_TARGET_PERCENT is reached.
+    Does NOT increase position sizing to try to reach this target faster."""
+    global _daily_target_locked
+    _refresh_daily_baseline()
+
+    if _start_of_day_equity is None or _start_of_day_equity <= 0:
+        return _daily_target_locked
+
+    current_equity = _get_equity()
+    if current_equity is None:
+        return _daily_target_locked
+
+    gain_percent = (current_equity - _start_of_day_equity) / _start_of_day_equity * 100
+    if gain_percent >= config.DAILY_TARGET_PERCENT:
+        if not _daily_target_locked:
+            log.info(f"Daily target reached (+{gain_percent:.2f}%). New trades paused for today.")
+        _daily_target_locked = True
+
+    return _daily_target_locked
 
 
 def count_open_positions():
@@ -94,7 +124,10 @@ def place_trade(tv_symbol: str, action: str, sl_price: float = None, tp_price: f
     Falls back to DEFAULT_SL_PERCENT / DEFAULT_TP_PERCENT if omitted.
     """
     if _check_daily_loss_lock():
-        return {"status": "blocked", "reason": "daily_loss_limit_hit"}
+        return {"status": "blocked", "reason": "daily_drawdown_limit_hit"}
+
+    if _check_daily_target_lock():
+        return {"status": "blocked", "reason": "daily_target_reached"}
 
     if count_open_positions() >= config.MAX_OPEN_TRADES:
         return {"status": "blocked", "reason": "max_open_trades_reached"}
@@ -179,8 +212,12 @@ def get_open_positions():
 
 def get_account_summary():
     equity = _get_equity()
+    import money_plan
+    plan_status = money_plan.get_status(equity)
     return {
         "equity": equity,
         "open_positions": count_open_positions(),
         "daily_loss_locked": _daily_loss_locked,
+        "daily_target_locked": _daily_target_locked,
+        "money_plan": plan_status,
     }
