@@ -102,14 +102,28 @@ def _get_instrument_filters(symbol):
     }
 
 
-def _calc_qty(symbol, entry_price, sl_price, equity):
-    """Position size based on % risk of equity and SL distance."""
-    risk_amount = equity * (config.RISK_PER_TRADE_PERCENT / 100)
-    sl_distance = abs(entry_price - sl_price)
-    if sl_distance <= 0:
-        sl_distance = entry_price * (config.DEFAULT_SL_PERCENT / 100)
+def _get_available_usdt():
+    """Actual spendable USDT margin - excludes BTC/other coin holdings that
+    aren't usable as margin for USDT-linear contracts."""
+    resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+    try:
+        coins = resp["result"]["list"][0]["coin"]
+        for c in coins:
+            if c["coin"] == "USDT":
+                return float(c["availableToWithdraw"] or c["walletBalance"] or 0)
+    except (KeyError, IndexError, TypeError):
+        log.error(f"Could not read available USDT from balance response: {resp}")
+    return 0.0
 
-    qty = risk_amount / sl_distance
+
+def _calc_qty_from_amount(symbol, entry_price, amount_usd):
+    """Position size based on a specific dollar amount (e.g. from a manual
+    trade), still capped by actual available USDT balance."""
+    available_usdt = _get_available_usdt()
+    max_notional = available_usdt * config.LEVERAGE * 0.95
+    notional = min(amount_usd * config.LEVERAGE, max_notional)
+
+    qty = notional / entry_price if entry_price > 0 else 0
     filters = _get_instrument_filters(symbol)
     qty = max(filters["min_qty"], qty)
     step = filters["qty_step"]
@@ -117,11 +131,56 @@ def _calc_qty(symbol, entry_price, sl_price, equity):
     return round(qty, 6)
 
 
-def place_trade(tv_symbol: str, action: str, sl_price: float = None, tp_price: float = None):
+def get_live_prices():
+    """Fetches last price + 24h change for every symbol in SYMBOL_MAP."""
+    prices = {}
+    try:
+        resp = session.get_tickers(category="linear")
+        rows = resp.get("result", {}).get("list", [])
+        wanted = set(config.SYMBOL_MAP.values())
+        for r in rows:
+            if r.get("symbol") in wanted:
+                prices[r["symbol"]] = {
+                    "last_price": float(r.get("lastPrice", 0)),
+                    "change_24h_percent": round(float(r.get("price24hPcnt", 0)) * 100, 2),
+                }
+    except Exception as e:
+        log.error(f"Failed to fetch live prices: {e}")
+    return prices
+
+
+def _calc_qty(symbol, entry_price, sl_price, equity):
+    """Position size based on % risk of equity and SL distance, capped so the
+    required margin never exceeds actual available USDT balance."""
+    risk_amount = equity * (config.RISK_PER_TRADE_PERCENT / 100)
+    sl_distance = abs(entry_price - sl_price)
+    if sl_distance <= 0:
+        sl_distance = entry_price * (config.DEFAULT_SL_PERCENT / 100)
+
+    qty = risk_amount / sl_distance
+
+    # Cap by actual available USDT margin (not total equity, which may include
+    # non-USDT holdings like BTC that aren't usable as margin here).
+    available_usdt = _get_available_usdt()
+    max_notional = available_usdt * config.LEVERAGE * 0.95  # 5% safety buffer
+    max_qty_by_balance = max_notional / entry_price if entry_price > 0 else 0
+    qty = min(qty, max_qty_by_balance)
+
+    filters = _get_instrument_filters(symbol)
+    qty = max(filters["min_qty"], qty)
+    step = filters["qty_step"]
+    qty = round(qty / step) * step
+    return round(qty, 6)
+
+
+def place_trade(tv_symbol: str, action: str, sl_price: float = None, tp_price: float = None, amount_usd: float = None):
     """
     action: 'buy' or 'sell'
     sl_price / tp_price: optional exact prices from your Pine Script signal.
     Falls back to DEFAULT_SL_PERCENT / DEFAULT_TP_PERCENT if omitted.
+    amount_usd: optional - if provided (e.g. from a manual trade), the position
+    size is based on this dollar amount instead of the automatic risk-% calc.
+    Still capped by available balance and leverage.
     """
     if _check_daily_loss_lock():
         return {"status": "blocked", "reason": "daily_drawdown_limit_hit"}
@@ -155,7 +214,10 @@ def place_trade(tv_symbol: str, action: str, sl_price: float = None, tp_price: f
     if equity is None:
         return {"status": "error", "reason": "could_not_fetch_equity"}
 
-    qty = _calc_qty(symbol, last_price, sl_price, equity)
+    if amount_usd is not None and amount_usd > 0:
+        qty = _calc_qty_from_amount(symbol, last_price, amount_usd)
+    else:
+        qty = _calc_qty(symbol, last_price, sl_price, equity)
 
     try:
         session.set_leverage(category="linear", symbol=symbol,
@@ -221,3 +283,46 @@ def get_account_summary():
         "daily_target_locked": _daily_target_locked,
         "money_plan": plan_status,
     }
+
+
+def get_trade_history(limit=50):
+    """Fetches recent closed trades from Bybit and computes summary stats."""
+    try:
+        resp = session.get_closed_pnl(category="linear", limit=limit)
+        rows = resp.get("result", {}).get("list", [])
+    except Exception as e:
+        log.error(f"Failed to fetch closed PnL: {e}")
+        return {"trades": [], "summary": {}}
+
+    trades = []
+    wins = 0
+    losses = 0
+    total_pnl = 0.0
+
+    for r in rows:
+        pnl = float(r.get("closedPnl", 0))
+        total_pnl += pnl
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+        trades.append({
+            "symbol": r.get("symbol"),
+            "side": r.get("side"),
+            "qty": r.get("qty"),
+            "entry_price": r.get("avgEntryPrice"),
+            "exit_price": r.get("avgExitPrice"),
+            "pnl": round(pnl, 4),
+            "closed_time": r.get("updatedTime"),
+        })
+
+    summary = {
+        "total_closed": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / len(trades) * 100), 1) if trades else 0,
+        "total_pnl": round(total_pnl, 4),
+        "open_positions": count_open_positions(),
+    }
+
+    return {"trades": trades, "summary": summary}
