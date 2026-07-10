@@ -227,3 +227,11 @@ def run_grid_backtest_endpoint():
         capture_output=True, text=True, timeout=120
     )
     return f"<pre>{result.stdout}\n{result.stderr}</pre>"
+  @app.route("/api/run_grid_backtest", methods=["GET"])
+def run_grid_backtest_endpoint():
+    import subprocess
+    result = subprocess.run(
+        ["python", "backtest_grid.py", "BTCUSDT", "--days", "90", "--repeat", "20"],
+        capture_output=True, text=True, timeout=120
+    )
+    return f"<pre>{result.stdout}\n{result.stderr}</pre>"
