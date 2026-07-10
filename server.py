@@ -219,4 +219,11 @@ def health():
 
 if __name__ == "__main__":
     log.info(f"Starting server on {config.SERVER_HOST}:{config.SERVER_PORT} (testnet={config.BYBIT_TESTNET})")
-    app.run(host=config.SERVER_HOST, port=config.SERVER_PORT)
+    app.run(host=config.SERVER_HOST, port=config.SERVER_PORT)@app.route("/api/run_grid_backtest", methods=["GET"])
+def run_grid_backtest_endpoint():
+    import subprocess
+    result = subprocess.run(
+        ["python", "backtest_grid.py", "BTCUSDT", "--days", "90", "--repeat", "20"],
+        capture_output=True, text=True, timeout=120
+    )
+    return f"<pre>{result.stdout}\n{result.stderr}</pre>"
