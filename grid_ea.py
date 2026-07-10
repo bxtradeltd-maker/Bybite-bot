@@ -35,11 +35,11 @@ log = logging.getLogger("grid_ea")
 # ---------------- Tunable parameters ----------------
 
 INITIAL_QTY_USD = 50          # notional size of the first grid level
-LOT_MULTIPLIER = 1.5          # each add-on level is this much bigger than the last
+LOT_MULTIPLIER = 1.3          # each add-on level is this much bigger than the last (was 1.5 - reduced so level 5 carries less notional when a stop triggers)
 GRID_STEP_PCT = 0.6           # price must move this % against the basket to add a level
 MAX_GRID_LEVELS = 5           # HARD CAP - do not add more than this many levels
 BASKET_TP_PCT = 1.0           # close whole basket when floating profit hits this % of total notional
-EQUITY_STOP_PCT = -8.0        # force-close whole basket at this % floating loss, no matter the level
+EQUITY_STOP_PCT = -5.5        # force-close whole basket at this % floating loss (was -8.0 - tightened to leave buffer for gap/overshoot risk seen in testing, where -8% actually printed -10.63%)
 POLL_SECONDS = 15             # how often to check price / manage the basket
 
 # in-memory basket state, keyed by symbol
